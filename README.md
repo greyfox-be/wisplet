@@ -113,8 +113,8 @@ src-tauri/
 
 ## Roadmap
 
+- [ ] **Rebindable hotkey from the settings drawer** (priority — needed to resolve conflicts with PowerToys Run / Flow Launcher)
 - [ ] In-app accent color picker
-- [ ] Rebindable hotkey
 - [ ] In-app editor for the app list (no more hand-editing `apps.json`)
 - [ ] Skins system: drop `.css` files in `~/.config/wisplet/skins/`, hot-reload
 - [ ] Plugin system: custom app sources, search providers, lifecycle hooks
