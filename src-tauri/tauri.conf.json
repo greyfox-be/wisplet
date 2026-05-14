@@ -42,9 +42,7 @@
         "scope": [
           "$HOME/.config/yasb/launchpad/icons/**",
           "$HOME/.config/yasb/**",
-          "C:/**",
-          "H:/**",
-          "F:/**"
+          "C:/**"
         ]
       }
     }
