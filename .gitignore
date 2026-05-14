@@ -1,0 +1,36 @@
+# Node
+node_modules
+.pnpm-store
+
+# SvelteKit / Vite
+/build
+/.svelte-kit
+/package
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Rust / Tauri
+/src-tauri/target
+/src-tauri/gen
+
+# Env
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / tooling
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea
+.claude/
+
+# Local-only multi-folder workspace (contains absolute paths)
+komorebi.code-workspace
+
+# Local-only project notes
+CLAUDE.md

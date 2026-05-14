@@ -1,0 +1,3 @@
+[tools]
+node = "22.19.0"
+# pnpm est géré par corepack via le champ "packageManager" du package.json
