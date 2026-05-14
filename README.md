@@ -8,7 +8,7 @@ Wisplet is a Launchpad-inspired app launcher that overlays the desktop on a glob
 
 ## Features
 
-- **Global hotkey toggle** (`Alt+Shift+A` by default — also bindable to a `LWin` tap via AHK).
+- **Global hotkey toggle** (`Alt+Space` by default — same as PowerToys Run / Flow Launcher; rebindable in settings is on the roadmap).
 - **Fast fuzzy search** across all your apps, with the input focused on every open.
 - **Sections** — apps are grouped (Dev, Media, Tools, …) into a masonry of cards.
 - **Mica blur** background (native Windows 11 windowEffect via Tauri).
@@ -54,9 +54,13 @@ Format:
 
 ## Hotkey
 
-The default hotkey is `Alt+Shift+A`, registered as a global shortcut via [`tauri-plugin-global-shortcut`](https://v2.tauri.app/plugin/global-shortcut/).
+The default hotkey is `Alt+Space`, registered as a global shortcut via [`tauri-plugin-global-shortcut`](https://v2.tauri.app/plugin/global-shortcut/). This matches the conventional launcher hotkey on Windows (PowerToys Run, Flow Launcher).
 
-To toggle with a single `LWin` tap (Win-key alone), use AutoHotkey. Minimal script:
+> **Conflict note**: if you already run PowerToys Run or Flow Launcher with the same default, only one will receive the hotkey. Rebind one of them — in-app rebinding for Wisplet is on the roadmap.
+
+### Optional: bind a single `LWin` tap
+
+If you want a single Windows-key tap to open Wisplet (instead of the Start menu), use AutoHotkey v2:
 
 ```ahk
 #Requires AutoHotkey v2.0
@@ -67,7 +71,7 @@ LWin:: {
     KeyWait "LWin"
     if (A_PriorKey != "LWin" && A_PriorKey != "vk07")
         return               ; let Win+X combos pass through
-    Send "!+a"               ; trigger Wisplet
+    Send "!{Space}"          ; trigger Wisplet
 }
 ```
 

@@ -153,8 +153,9 @@
     if (e.key === "Escape") {
       if (settingsOpen) settingsOpen = false;
       else visible = false; // CSS transition out → ontransitionend → hide_window
-    } else if (e.altKey && e.shiftKey && e.key.toLowerCase() === "a") {
-      // Local fallback for Alt+Shift+A — Win11 fullscreen sometimes swallows global hotkeys.
+    } else if (e.altKey && e.key === " ") {
+      // Local fallback for Alt+Space when the window already has focus —
+      // the global shortcut is a no-op while we own the keyboard.
       e.preventDefault();
       visible = false;
     }

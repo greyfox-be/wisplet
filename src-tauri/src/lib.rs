@@ -153,7 +153,7 @@ fn show_or_hide(app: &AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let toggle_shortcut = Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::KeyA);
+    let toggle_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Space);
 
     tauri::Builder::default()
         .manage(AppState::default())
@@ -209,7 +209,7 @@ pub fn run() {
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("Wisplet — Alt+Shift+A to toggle")
+                .tooltip("Wisplet — Alt+Space to toggle")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
