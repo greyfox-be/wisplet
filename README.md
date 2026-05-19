@@ -17,9 +17,10 @@ Wisplet is a Launchpad-inspired app launcher that overlays the desktop on a glob
 
 ## Features
 
-- **Global hotkey toggle** (`Alt+Space` by default — same as PowerToys Run / Flow Launcher; rebindable in settings is on the roadmap).
+- **Global hotkey toggle** (`Alt+Space` by default — same as PowerToys Run / Flow Launcher; rebindable from the settings drawer, with automatic fallback if the combo is already taken).
 - **Fast fuzzy search** across all your apps, with the input focused on every open.
 - **Sections** — apps are grouped (Dev, Media, Tools, …) into a masonry of cards.
+- **In-app app management** — add, edit and remove apps from the UI (right-click a tile, or *Add an app* in the settings drawer); icon and title are auto-filled from the executable.
 - **Mica blur** background (native Windows 11 windowEffect via Tauri).
 - **Zero white flash** — Win32 layered-window alpha trick lets the WebView paint before the window is ever visible.
 - **Optional cover-screen mode** — the window resizes to fully cover the current monitor (without using Win11's real fullscreen, which would eat the global hotkey).
@@ -44,13 +45,15 @@ Grab the latest `Wisplet_<version>_x64-setup.exe` (NSIS) or `.msi` from the [Rel
 
 ## Configuration
 
-Wisplet reads its app list from:
+Wisplet keeps its app list in:
 
 ```
-%USERPROFILE%\.config\yasb\launchpad\apps.json
+%USERPROFILE%\.config\wisplet\apps.json
 ```
 
-Format:
+On first run, if that file doesn't exist, Wisplet seeds it once from an existing [yasb-launchpad](https://github.com/amnweb/yasb) config (`%USERPROFILE%\.config\yasb\launchpad\apps.json`). After that, Wisplet owns its own file.
+
+Apps are managed from the UI — right-click a tile to edit or remove it, or use *Add an app* in the settings drawer. The file stays plain JSON if you'd rather edit it directly:
 
 ```json
 [
@@ -60,18 +63,16 @@ Format:
     "path": "C:\\Users\\you\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
     "icon": "C:\\path\\to\\icon.png",
     "group": "Dev",
-    "type": "exe"
+    "type": "app"
   }
 ]
 ```
-
-> The path is reused from [yasb-launchpad](https://github.com/amnweb/yasb) for compatibility. A native config UI is on the roadmap.
 
 ## Hotkey
 
 The default hotkey is `Alt+Space`, registered as a global shortcut via [`tauri-plugin-global-shortcut`](https://v2.tauri.app/plugin/global-shortcut/). This matches the conventional launcher hotkey on Windows (PowerToys Run, Flow Launcher).
 
-> **Conflict note**: if you already run PowerToys Run or Flow Launcher with the same default, only one will receive the hotkey. Rebind one of them — in-app rebinding for Wisplet is on the roadmap.
+> **Conflict note**: if `Alt+Space` is already taken (e.g. by PowerToys Run), Wisplet automatically falls back to `Ctrl+Alt+Space`, then `Ctrl+Shift+Space`. You can also set any combination from the settings drawer; if every fallback is taken too, Wisplet opens its settings on launch so you can pick one.
 
 ### Optional: bind a single `LWin` tap
 
@@ -128,9 +129,7 @@ src-tauri/
 
 ## Roadmap
 
-- [ ] **Rebindable hotkey from the settings drawer** (priority — needed to resolve conflicts with PowerToys Run / Flow Launcher)
 - [ ] In-app accent color picker
-- [ ] In-app editor for the app list (no more hand-editing `apps.json`)
 - [ ] Skins system: drop `.css` files in `~/.config/wisplet/skins/`, hot-reload
 - [ ] Plugin system: custom app sources, search providers, lifecycle hooks
 
