@@ -11,7 +11,9 @@
 
 Wisplet is a Launchpad-inspired app launcher that overlays the desktop on a global hotkey. Search, browse grouped sections, launch — then it gets out of your way.
 
-<!-- TODO: add screenshot once UI is stable -->
+<p align="center">
+  <img src="reference/fullscreen.png" alt="Wisplet launcher overlay" width="840" />
+</p>
 
 ## Features
 
@@ -23,6 +25,12 @@ Wisplet is a Launchpad-inspired app launcher that overlays the desktop on a glob
 - **Optional cover-screen mode** — the window resizes to fully cover the current monitor (without using Win11's real fullscreen, which would eat the global hotkey).
 - **System tray** with show / quit menu, single-instance lifecycle.
 - **Persistent settings** (icon / label size, tile width, cover-screen toggle) in `localStorage`.
+
+## Screenshots
+
+| <img src="reference/settings.png" alt="Settings drawer" width="380" /> | <img src="reference/add-app.png" alt="Add an app" width="380" /> |
+|:--:|:--:|
+| Settings drawer — appearance, hotkey, app management | Adding an app — native file picker, auto-filled icon & title |
 
 ## Requirements
 
