@@ -2,6 +2,8 @@
   import { invoke } from "@tauri-apps/api/core";
   import { convertFileSrc } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { listen } from "@tauri-apps/api/event";
+  import { open } from "@tauri-apps/plugin-dialog";
   import { onMount, tick } from "svelte";
   import { fade, scale } from "svelte/transition";
   import { flip } from "svelte/animate";
@@ -26,6 +28,8 @@
     tileMin: number;
     bgMode: BgMode;
     fullscreen: boolean;
+    groupOrder: string[];
+    hotkey: string;
   };
 
   const DEFAULT_SETTINGS: Settings = {
@@ -34,6 +38,8 @@
     tileMin: 72,
     bgMode: "mica",
     fullscreen: false,
+    groupOrder: [],
+    hotkey: "Alt+Space",
   };
 
   function loadSettings(): Settings {
@@ -43,6 +49,8 @@
       const parsed = JSON.parse(raw);
       // Migrate legacy bgMode values (acrylic/overlay → mica)
       if (parsed.bgMode !== "mica") parsed.bgMode = "mica";
+      if (!Array.isArray(parsed.groupOrder)) parsed.groupOrder = [];
+      if (typeof parsed.hotkey !== "string" || !parsed.hotkey.trim()) parsed.hotkey = DEFAULT_SETTINGS.hotkey;
       return { ...DEFAULT_SETTINGS, ...parsed };
     } catch {
       return { ...DEFAULT_SETTINGS };
@@ -58,7 +66,33 @@
   let settings = $state<Settings>(loadSettings());
   let settingsOpen = $state(false);
 
+  // Hotkey state — `activeHotkey` mirrors what Rust actually registered (cascade
+  // pick or restored user choice). `settings.hotkey` is the user's saved
+  // preference and only changes when the user explicitly applies one via the UI.
+  // If the saved choice was unavailable at boot, `hotkeyFallbackNotice` carries
+  // the (saved, active) pair so the launcher banner can tell the user.
+  let activeHotkey = $state<string | null>(null);
+  let hotkeyError = $state<string | null>(null);
+  let hotkeyConflict = $state(false);
+  let hotkeyFallbackNotice = $state<{ saved: string; active: string } | null>(null);
+  let capturingHotkey = $state(false);
+  let captureBuffer = $state("");
+  let manualCombo = $state("");
+
   let searchInput = $state<HTMLInputElement | null>(null);
+
+  // ===== App editor (add / edit / delete) =====
+  // `editorDraft` is a working copy — mutated freely, only merged into `apps`
+  // on save. Context menu and delete confirmation are transient overlays.
+  let editorOpen = $state(false);
+  let editorMode = $state<"add" | "edit">("add");
+  let editorDraft = $state<App | null>(null);
+  let editorBusy = $state(false);
+  let editorError = $state<string | null>(null);
+  // `app` set → menu on a tile (Modifier/Supprimer). `group` carries the
+  // pre-fill for "Ajouter une app" — the card's group, or null in empty space.
+  let contextMenu = $state<{ x: number; y: number; app: App | null; group: string | null } | null>(null);
+  let pendingDelete = $state<App | null>(null);
 
   // Persist settings
   $effect(() => {
@@ -101,9 +135,341 @@
       if (!map.has(g)) map.set(g, []);
       map.get(g)!.push(a);
     }
-    return [...map.entries()]
-      .map(([name, apps]) => ({ name, apps: apps.slice().sort((a, b) => a.title.localeCompare(b.title)) }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+    const sections = [...map.entries()].map(([name, apps]) => ({
+      name,
+      apps: apps.slice().sort((a, b) => a.title.localeCompare(b.title)),
+    }));
+    const order = settings.groupOrder;
+    const orderIdx = new Map(order.map((n, i) => [n, i]));
+    return sections.sort((a, b) => {
+      const ia = orderIdx.has(a.name) ? (orderIdx.get(a.name) as number) : Infinity;
+      const ib = orderIdx.has(b.name) ? (orderIdx.get(b.name) as number) : Infinity;
+      if (ia !== ib) return ia - ib;
+      return a.name.localeCompare(b.name);
+    });
+  }
+
+  // ===== Drag & drop reordering of group sections =====
+  let draggedGroup = $state<string | null>(null);
+  let dropTarget = $state<{ name: string; pos: "before" | "after" } | null>(null);
+
+  function onGroupDragStart(e: DragEvent, name: string) {
+    if (query.trim()) {
+      e.preventDefault();
+      return;
+    }
+    draggedGroup = name;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", name);
+    }
+  }
+
+  function onGroupDragOver(e: DragEvent, name: string) {
+    if (!draggedGroup || draggedGroup === name) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    const target = e.currentTarget as HTMLElement;
+    const rect = target.getBoundingClientRect();
+    const pos: "before" | "after" = e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    if (!dropTarget || dropTarget.name !== name || dropTarget.pos !== pos) {
+      dropTarget = { name, pos };
+    }
+  }
+
+  function onGroupDragLeave(e: DragEvent, name: string) {
+    // Only clear if we're actually leaving (not entering a child)
+    const related = e.relatedTarget as Node | null;
+    if (related && (e.currentTarget as Node).contains(related)) return;
+    if (dropTarget?.name === name) dropTarget = null;
+  }
+
+  function onGroupDrop(e: DragEvent, name: string) {
+    e.preventDefault();
+    if (!draggedGroup || draggedGroup === name) {
+      draggedGroup = null;
+      dropTarget = null;
+      return;
+    }
+    const allNames = filteredSections.map((s) => s.name);
+    const current = settings.groupOrder.length
+      ? [...settings.groupOrder.filter((n) => allNames.includes(n)), ...allNames.filter((n) => !settings.groupOrder.includes(n))]
+      : [...allNames];
+    const from = current.indexOf(draggedGroup);
+    if (from === -1) return;
+    current.splice(from, 1);
+    let to = current.indexOf(name);
+    if (to === -1) return;
+    const pos = dropTarget?.pos ?? "before";
+    if (pos === "after") to += 1;
+    current.splice(to, 0, draggedGroup);
+    settings.groupOrder = current;
+    draggedGroup = null;
+    dropTarget = null;
+  }
+
+  function onGroupDragEnd() {
+    draggedGroup = null;
+    dropTarget = null;
+  }
+
+  function resetGroupOrder() {
+    settings.groupOrder = [];
+  }
+
+  // ===== Hotkey rebind =====
+  // Modifier-only codes — pressing just Ctrl/Alt/Shift/Super is not a valid combo.
+  const MODIFIER_CODES = new Set([
+    "ControlLeft", "ControlRight",
+    "AltLeft", "AltRight",
+    "ShiftLeft", "ShiftRight",
+    "MetaLeft", "MetaRight",
+    "OSLeft", "OSRight",
+  ]);
+
+  function buildCombo(e: KeyboardEvent): string | null {
+    if (MODIFIER_CODES.has(e.code)) return null;
+    const parts: string[] = [];
+    if (e.ctrlKey) parts.push("Ctrl");
+    if (e.altKey) parts.push("Alt");
+    if (e.shiftKey) parts.push("Shift");
+    if (e.metaKey) parts.push("Super");
+    if (parts.length === 0) return null;
+    parts.push(e.code);
+    return parts.join("+");
+  }
+
+  // Human-friendly label: KeyA → A, Digit1 → 1, Super → Win.
+  function formatComboLabel(combo: string | null): string {
+    if (!combo) return "—";
+    return combo
+      .replace(/\bSuper\b/g, "Win")
+      .replace(/\bKey([A-Z])\b/g, "$1")
+      .replace(/\bDigit(\d)\b/g, "$1");
+  }
+
+  async function syncHotkey() {
+    try {
+      const current = await invoke<string | null>("get_current_hotkey");
+      activeHotkey = current ?? null;
+      hotkeyConflict = current === null;
+    } catch (e) {
+      console.warn("get_current_hotkey failed:", e);
+    }
+  }
+
+  // Boot-time restore: try the user's saved binding first. If it's free, Rust
+  // unregisters the cascade entry it grabbed at setup and switches to it. If
+  // it's taken, we leave the cascade fallback alone and surface a banner so
+  // the user knows their choice didn't apply this session.
+  async function restoreHotkey() {
+    const saved = settings.hotkey;
+    if (!saved) {
+      await syncHotkey();
+      return;
+    }
+    try {
+      const result = await invoke<string>("set_hotkey", { combo: saved });
+      activeHotkey = result;
+      hotkeyConflict = false;
+      hotkeyFallbackNotice = null;
+    } catch {
+      const fallback = await invoke<string | null>("get_current_hotkey");
+      activeHotkey = fallback;
+      hotkeyConflict = fallback === null;
+      if (fallback && fallback !== saved) {
+        hotkeyFallbackNotice = { saved, active: fallback };
+      }
+    }
+  }
+
+  async function applyHotkey(combo: string) {
+    hotkeyError = null;
+    try {
+      const result = await invoke<string>("set_hotkey", { combo });
+      activeHotkey = result;
+      settings.hotkey = result;
+      hotkeyConflict = false;
+      hotkeyFallbackNotice = null;
+      capturingHotkey = false;
+      captureBuffer = "";
+    } catch (e) {
+      hotkeyError = String(e);
+    }
+  }
+
+  function startCapture() {
+    capturingHotkey = true;
+    captureBuffer = "";
+    hotkeyError = null;
+  }
+
+  function cancelCapture() {
+    capturingHotkey = false;
+    captureBuffer = "";
+  }
+
+  function onCaptureKey(e: KeyboardEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape" && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) {
+      cancelCapture();
+      return;
+    }
+    const combo = buildCombo(e);
+    if (combo) captureBuffer = combo;
+  }
+
+  function onCaptureKeyUp(e: KeyboardEvent) {
+    if (!capturingHotkey) return;
+    if (MODIFIER_CODES.has(e.code)) return;
+    if (captureBuffer) {
+      applyHotkey(captureBuffer);
+    }
+  }
+
+  // ===== App editor logic =====
+  // Existing group names — feeds the editor's group datalist for autocomplete.
+  let groupNames = $derived.by(() => {
+    const set = new Set<string>();
+    for (const a of apps) {
+      const g = a.group?.trim();
+      if (g) set.add(g);
+    }
+    return [...set].sort((a, b) => a.localeCompare(b));
+  });
+
+  async function persistApps() {
+    try {
+      await invoke("save_apps", { apps });
+    } catch (e) {
+      console.error("save_apps failed", e);
+    }
+  }
+
+  // Suppress auto-hide while the editor is open: the native file picker steals
+  // window focus, which would otherwise trigger anim-out and hide the launcher.
+  async function setHideSuppressed(value: boolean) {
+    try {
+      await invoke("set_hide_suppressed", { value });
+    } catch (e) {
+      console.warn("set_hide_suppressed failed:", e);
+    }
+  }
+
+  function openAddEditor(group: string | null = null) {
+    editorMode = "add";
+    editorDraft = { id: Date.now(), title: "", path: "", icon: null, group, type: "app" };
+    editorError = null;
+    contextMenu = null;
+    editorOpen = true;
+    setHideSuppressed(true);
+  }
+
+  function openEditEditor(app: App) {
+    editorMode = "edit";
+    editorDraft = { ...app };
+    editorError = null;
+    contextMenu = null;
+    editorOpen = true;
+    setHideSuppressed(true);
+  }
+
+  function closeEditor() {
+    editorOpen = false;
+    editorDraft = null;
+    editorError = null;
+    editorBusy = false;
+    setHideSuppressed(false);
+  }
+
+  // Picked a path → auto-fill icon (always) and title (only when still empty,
+  // so a name the user already typed is never clobbered).
+  async function inspectApp(path: string) {
+    if (!editorDraft) return;
+    editorBusy = true;
+    try {
+      const info = await invoke<{ title: string; icon: string | null }>("inspect_app", { path });
+      if (!editorDraft) return;
+      if (info.icon) editorDraft.icon = info.icon;
+      if (info.title && !editorDraft.title.trim()) editorDraft.title = info.title;
+    } catch (e) {
+      console.warn("inspect_app failed:", e); // keep current icon / letter fallback
+    } finally {
+      editorBusy = false;
+    }
+  }
+
+  async function browsePath() {
+    if (!editorDraft) return;
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Applications", extensions: ["exe", "lnk"] }],
+    });
+    if (typeof selected === "string") {
+      editorDraft.path = selected;
+      await inspectApp(selected);
+    }
+  }
+
+  async function browseIcon() {
+    if (!editorDraft) return;
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Images", extensions: ["png", "svg", "jpg", "jpeg", "ico"] }],
+    });
+    if (typeof selected === "string") editorDraft.icon = selected;
+  }
+
+  function clearIcon() {
+    if (editorDraft) editorDraft.icon = null;
+  }
+
+  async function saveEditor() {
+    if (!editorDraft) return;
+    const title = editorDraft.title.trim();
+    const path = editorDraft.path.trim();
+    if (!title) { editorError = "Le titre est requis."; return; }
+    if (!path) { editorError = "Le chemin est requis."; return; }
+    const group = editorDraft.group?.trim() || null;
+    const finalApp: App = { ...editorDraft, title, path, group };
+    apps = editorMode === "add"
+      ? [...apps, finalApp]
+      : apps.map((a) => (a.id === finalApp.id ? finalApp : a));
+    await persistApps();
+    closeEditor();
+  }
+
+  // Three right-click zones — each stops propagation so only the most specific
+  // handler fires (tile inside card inside columns).
+  function onAppContextMenu(e: MouseEvent, app: App) {
+    e.preventDefault();
+    e.stopPropagation();
+    contextMenu = { x: e.clientX, y: e.clientY, app, group: app.group ?? null };
+  }
+
+  function onCardContextMenu(e: MouseEvent, group: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    contextMenu = { x: e.clientX, y: e.clientY, app: null, group };
+  }
+
+  function onEmptyContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    contextMenu = { x: e.clientX, y: e.clientY, app: null, group: null };
+  }
+
+  function requestDelete(app: App) {
+    contextMenu = null;
+    pendingDelete = app;
+  }
+
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    const id = pendingDelete.id;
+    apps = apps.filter((a) => a.id !== id);
+    pendingDelete = null;
+    await persistApps();
   }
 
   // Filter + group
@@ -150,8 +516,15 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    if (capturingHotkey) {
+      onCaptureKey(e);
+      return;
+    }
     if (e.key === "Escape") {
-      if (settingsOpen) settingsOpen = false;
+      if (contextMenu) contextMenu = null;
+      else if (pendingDelete) pendingDelete = null;
+      else if (editorOpen) closeEditor();
+      else if (settingsOpen) settingsOpen = false;
       else visible = false; // CSS transition out → ontransitionend → hide_window
     } else if (e.altKey && e.key === " ") {
       // Local fallback for Alt+Space when the window already has focus —
@@ -166,9 +539,25 @@
     return convertFileSrc(app.icon);
   }
 
+  // Kill WebView2's default right-click menu and page-level shortcuts
+  // (reload / print / back) — they break or interrupt the launcher. Reload in
+  // particular tears down the Svelte app and leaves a blank shell.
+  function blockContextMenu(e: MouseEvent) {
+    e.preventDefault();
+  }
+  function blockBrowserKeys(e: KeyboardEvent) {
+    const k = e.key.toLowerCase();
+    const reload = e.key === "F5" || (e.ctrlKey && k === "r");
+    const pageCmd = e.ctrlKey && (k === "p" || k === "s");
+    const navBack = e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight");
+    if (reload || pageCmd || navBack) e.preventDefault();
+  }
+
   onMount(async () => {
     updateColumnCount();
     window.addEventListener("resize", updateColumnCount);
+    window.addEventListener("contextmenu", blockContextMenu);
+    window.addEventListener("keydown", blockBrowserKeys, { capture: true });
 
     await applyBg(settings.bgMode);
 
@@ -202,10 +591,23 @@
         requestAnimationFrame(() => searchInput?.focus());
       }
     });
+
+    // Backend emits this when none of the fallback hotkeys could be registered.
+    const unlistenConflict = await listen("hotkey-conflict", () => {
+      hotkeyConflict = true;
+      settingsOpen = true;
+    });
+
+    await restoreHotkey();
+
     return () => {
       unlistenIn();
       unlistenOut();
       unlistenFocus();
+      unlistenConflict();
+      window.removeEventListener("resize", updateColumnCount);
+      window.removeEventListener("contextmenu", blockContextMenu);
+      window.removeEventListener("keydown", blockBrowserKeys, { capture: true });
     };
   });
 
@@ -214,7 +616,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onKey} onkeyup={onCaptureKeyUp} />
 
 {#if mounted}
   <main
@@ -250,6 +652,21 @@
       </button>
     </div>
 
+    {#if hotkeyFallbackNotice}
+      <div class="hotkey-fallback-banner" role="status">
+        <span>
+          Raccourci <kbd>{formatComboLabel(hotkeyFallbackNotice.saved)}</kbd>
+          indisponible — Wisplet utilise <kbd>{formatComboLabel(hotkeyFallbackNotice.active)}</kbd>
+          pour cette session.
+        </span>
+        <button
+          class="banner-dismiss"
+          onclick={() => (hotkeyFallbackNotice = null)}
+          aria-label="Fermer"
+        >✕</button>
+      </div>
+    {/if}
+
     {#if loadError}
       <div class="error-banner">
         <strong>Erreur load_apps:</strong> {loadError}
@@ -258,16 +675,30 @@
       <div class="error-banner empty">Aucune app trouvée (apps.length === 0)</div>
     {/if}
 
-    <div class="columns">
+    <div class="columns" oncontextmenu={onEmptyContextMenu} role="presentation">
       {#each columns as col, ci (ci)}
         <div class="column">
           {#each col as section (section.name)}
             <section
               class="card"
+              class:dragging={draggedGroup === section.name}
+              class:drop-before={dropTarget?.name === section.name && dropTarget.pos === "before"}
+              class:drop-after={dropTarget?.name === section.name && dropTarget.pos === "after"}
+              aria-label={section.name}
               in:fade={{ duration: 220, delay: 40 * ci }}
               animate:flip={{ duration: 300, easing: quintOut }}
+              ondragover={(e) => onGroupDragOver(e, section.name)}
+              ondragleave={(e) => onGroupDragLeave(e, section.name)}
+              ondrop={(e) => onGroupDrop(e, section.name)}
+              oncontextmenu={(e) => onCardContextMenu(e, section.name)}
             >
-              <h3 class="section-title">
+              <h3
+                class="section-title"
+                class:draggable={!query.trim()}
+                draggable={!query.trim()}
+                ondragstart={(e) => onGroupDragStart(e, section.name)}
+                ondragend={onGroupDragEnd}
+              >
                 {section.name}
                 <span class="count">{section.apps.length}</span>
               </h3>
@@ -276,6 +707,7 @@
                   <button
                     class="app"
                     onclick={() => launch(app)}
+                    oncontextmenu={(e) => onAppContextMenu(e, app)}
                     title={app.title}
                     animate:flip={{ duration: 300, easing: quintOut }}
                   >
@@ -365,11 +797,222 @@
             </label>
           </section>
 
+          <section class="setting-group">
+            <h3>Apps</h3>
+            <p class="setting-hint">
+              {apps.length} apps. Clic droit sur une tuile pour modifier ou supprimer.
+            </p>
+            <button class="btn-secondary" onclick={() => openAddEditor()}>
+              Ajouter une app
+            </button>
+          </section>
+
+          <section class="setting-group">
+            <h3>Raccourci</h3>
+            <p class="setting-hint">
+              Combinaison globale pour ouvrir/fermer Wisplet. Si elle est déjà prise,
+              Wisplet retombe automatiquement sur <code>Ctrl+Alt+Espace</code> puis
+              <code>Ctrl+Shift+Espace</code>.
+            </p>
+
+            <div class="hotkey-row">
+              <span class="setting-label">Raccourci actuel</span>
+              <kbd class="hotkey-display" class:conflict={hotkeyConflict}>
+                {formatComboLabel(activeHotkey)}
+              </kbd>
+            </div>
+
+            {#if hotkeyConflict}
+              <p class="setting-error">
+                Aucun raccourci par défaut n'a pu être enregistré (tous occupés par
+                d'autres apps). Définissez-en un personnalisé ci-dessous.
+              </p>
+            {/if}
+
+            {#if capturingHotkey}
+              <div class="capture-box">
+                <span class="capture-hint">Appuyez sur la combinaison…</span>
+                <kbd class="hotkey-display capturing">
+                  {captureBuffer ? formatComboLabel(captureBuffer) : "…"}
+                </kbd>
+                <button class="btn-secondary" onclick={cancelCapture}>
+                  Annuler (Échap)
+                </button>
+              </div>
+            {:else}
+              <button class="btn-secondary" onclick={startCapture}>
+                Modifier le raccourci
+              </button>
+            {/if}
+
+            <div class="manual-combo">
+              <span class="setting-hint">
+                Ou saisir manuellement (ex. <code>F13</code>, <code>Ctrl+Shift+F12</code>) —
+                utile pour les touches absentes du clavier physique.
+              </span>
+              <div class="manual-combo-row">
+                <input
+                  type="text"
+                  placeholder="F13"
+                  bind:value={manualCombo}
+                  onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Enter' && manualCombo.trim()) applyHotkey(manualCombo.trim()); }}
+                />
+                <button
+                  class="btn-secondary"
+                  disabled={!manualCombo.trim()}
+                  onclick={() => applyHotkey(manualCombo.trim())}
+                >
+                  Appliquer
+                </button>
+              </div>
+            </div>
+
+            {#if hotkeyError}
+              <p class="setting-error">{hotkeyError}</p>
+            {/if}
+          </section>
+
+          <section class="setting-group">
+            <h3>Organisation</h3>
+            <p class="setting-hint">
+              Glissez le titre d'un groupe pour réorganiser l'ordre d'affichage.
+            </p>
+            <button
+              class="btn-secondary"
+              onclick={resetGroupOrder}
+              disabled={settings.groupOrder.length === 0}
+            >
+              Réinitialiser l'ordre des groupes
+            </button>
+          </section>
+
           <div class="drawer-footer">
             <button class="btn-secondary" onclick={resetSettings}>Valeurs par défaut</button>
           </div>
         </div>
       </aside>
+    {/if}
+
+    {#if contextMenu}
+      <div
+        class="ctx-backdrop"
+        onclick={() => (contextMenu = null)}
+        oncontextmenu={(e) => { e.preventDefault(); contextMenu = null; }}
+        role="presentation"
+      ></div>
+      <div class="ctx-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
+        {#if contextMenu.app}
+          <button onclick={() => openEditEditor(contextMenu!.app!)}>Modifier</button>
+          <button class="ctx-danger" onclick={() => requestDelete(contextMenu!.app!)}>Supprimer</button>
+          <div class="ctx-sep"></div>
+        {/if}
+        <button onclick={() => openAddEditor(contextMenu!.group)}>Ajouter une app</button>
+      </div>
+    {/if}
+
+    {#if pendingDelete}
+      <div class="modal-backdrop" transition:fade={{ duration: 120 }} role="presentation"></div>
+      <div class="modal confirm-modal" transition:scale={{ duration: 140, start: 0.96, easing: quintOut }}>
+        <p class="confirm-text">Supprimer <strong>{pendingDelete.title}</strong> ?</p>
+        <div class="modal-actions">
+          <button class="btn-secondary" onclick={() => (pendingDelete = null)}>Annuler</button>
+          <button class="btn-danger" onclick={confirmDelete}>Supprimer</button>
+        </div>
+      </div>
+    {/if}
+
+    {#if editorOpen && editorDraft}
+      <div class="modal-backdrop" transition:fade={{ duration: 120 }} role="presentation"></div>
+      <div class="modal editor-modal" transition:scale={{ duration: 140, start: 0.96, easing: quintOut }}>
+        <div class="modal-header">
+          <h2>{editorMode === "add" ? "Ajouter une app" : "Modifier l'app"}</h2>
+          <button class="drawer-close" onclick={closeEditor} aria-label="Close">✕</button>
+        </div>
+
+        <div class="editor-body">
+          <label class="field">
+            <span class="field-label">Chemin</span>
+            <div class="field-row">
+              <input
+                type="text"
+                bind:value={editorDraft.path}
+                placeholder="C:\…\app.exe"
+                spellcheck="false"
+                autocomplete="off"
+                onkeydown={(e) => e.stopPropagation()}
+              />
+              <button class="btn-secondary" onclick={browsePath}>Parcourir…</button>
+            </div>
+            <span class="field-hint">Sélectionner un .exe / .lnk pré-remplit l'icône et le titre.</span>
+          </label>
+
+          <div class="field">
+            <span class="field-label">Icône</span>
+            <div class="icon-field">
+              <div class="icon-preview">
+                {#if editorBusy}
+                  <span class="icon-spinner"></span>
+                {:else if editorDraft.icon}
+                  <img src={convertFileSrc(editorDraft.icon)} alt="" />
+                {:else}
+                  <div class="icon-fallback">{editorDraft.title.trim()[0] ?? "?"}</div>
+                {/if}
+              </div>
+              <div class="icon-actions">
+                <button class="btn-secondary" onclick={browseIcon}>Choisir une icône…</button>
+                <button
+                  class="btn-secondary"
+                  onclick={clearIcon}
+                  disabled={!editorDraft.icon}
+                >
+                  Réinitialiser
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <label class="field">
+            <span class="field-label">Titre</span>
+            <input
+              type="text"
+              bind:value={editorDraft.title}
+              placeholder="Nom de l'app"
+              spellcheck="false"
+              autocomplete="off"
+              onkeydown={(e) => e.stopPropagation()}
+            />
+          </label>
+
+          <label class="field">
+            <span class="field-label">Groupe</span>
+            <input
+              type="text"
+              list="group-list"
+              bind:value={editorDraft.group}
+              placeholder="Autres"
+              spellcheck="false"
+              autocomplete="off"
+              onkeydown={(e) => e.stopPropagation()}
+            />
+            <datalist id="group-list">
+              {#each groupNames as g (g)}
+                <option value={g}></option>
+              {/each}
+            </datalist>
+          </label>
+
+          {#if editorError}
+            <p class="setting-error">{editorError}</p>
+          {/if}
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn-secondary" onclick={closeEditor}>Annuler</button>
+          <button class="btn-primary" onclick={saveEditor}>
+            {editorMode === "add" ? "Ajouter" : "Enregistrer"}
+          </button>
+        </div>
+      </div>
     {/if}
   </main>
 {/if}
@@ -515,6 +1158,40 @@
     color: #ffe6b0;
   }
 
+  .hotkey-fallback-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(138, 180, 255, 0.12);
+    border: 1px solid rgba(138, 180, 255, 0.3);
+    color: #e3ecff;
+    padding: 8px 12px;
+    border-radius: 10px;
+    margin-bottom: 12px;
+    font-size: 12.5px;
+  }
+  .hotkey-fallback-banner span { flex: 1; }
+  .hotkey-fallback-banner kbd {
+    font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", monospace;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11.5px;
+  }
+  .banner-dismiss {
+    background: transparent;
+    border: none;
+    color: inherit;
+    opacity: 0.7;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: opacity 120ms, background 120ms;
+  }
+  .banner-dismiss:hover { opacity: 1; background: rgba(255, 255, 255, 0.06); }
+
   .columns {
     flex: 1;
     overflow-y: auto;
@@ -538,7 +1215,24 @@
     border-radius: 14px;
     padding: 14px 12px 12px;
     backdrop-filter: blur(20px);
+    position: relative;
+    transition: opacity 140ms ease;
   }
+  .card.dragging { opacity: 0.4; }
+  .card.drop-before::before,
+  .card.drop-after::after {
+    content: "";
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--accent);
+    box-shadow: 0 0 8px rgba(138, 180, 255, 0.6);
+    pointer-events: none;
+  }
+  .card.drop-before::before { top: -7px; }
+  .card.drop-after::after { bottom: -7px; }
 
   .section-title {
     font-size: 12px;
@@ -550,7 +1244,10 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    user-select: none;
   }
+  .section-title.draggable { cursor: grab; }
+  .section-title.draggable:active { cursor: grabbing; }
   .section-title .count {
     font-weight: 500;
     font-size: 11px;
@@ -826,5 +1523,315 @@
     font-size: 12.5px;
     transition: background 120ms;
   }
-  .btn-secondary:hover { background: rgba(255, 255, 255, 0.12); }
+  .btn-secondary:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); }
+  .btn-secondary:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .setting-hint {
+    font-size: 12px;
+    color: var(--fg-dim);
+    margin: 0 0 12px;
+    line-height: 1.4;
+  }
+  .setting-hint code {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 11px;
+  }
+
+  .setting-error {
+    font-size: 12px;
+    color: #ff9a9a;
+    margin: 8px 0 12px;
+    line-height: 1.4;
+  }
+
+  .hotkey-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  .hotkey-display {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 12px;
+    color: var(--fg);
+    min-width: 120px;
+    text-align: center;
+  }
+  .hotkey-display.conflict {
+    border-color: rgba(255, 154, 154, 0.45);
+    color: #ff9a9a;
+  }
+  .hotkey-display.capturing {
+    border-color: var(--accent);
+    color: var(--accent);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(138, 180, 255, 0.4); }
+    50% { box-shadow: 0 0 0 4px rgba(138, 180, 255, 0); }
+  }
+
+  .capture-box {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px dashed rgba(138, 180, 255, 0.35);
+    border-radius: 8px;
+  }
+  .capture-hint {
+    font-size: 12px;
+    color: var(--fg-dim);
+  }
+
+  .manual-combo {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .manual-combo-row {
+    display: flex;
+    gap: 8px;
+  }
+  .manual-combo-row input {
+    flex: 1;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    color: var(--fg);
+    padding: 7px 10px;
+    font-size: 13px;
+    font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", monospace;
+    outline: none;
+    transition: border-color 120ms, background 120ms;
+  }
+  .manual-combo-row input:focus {
+    border-color: var(--accent);
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .manual-combo-row button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* ===== Context menu ===== */
+  .ctx-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 95;
+  }
+  .ctx-menu {
+    position: fixed;
+    z-index: 100;
+    min-width: 140px;
+    background: rgba(28, 28, 34, 0.98);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 4px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+  }
+  .ctx-menu button {
+    background: transparent;
+    border: none;
+    color: var(--fg);
+    text-align: left;
+    padding: 7px 10px;
+    border-radius: 5px;
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: background 100ms;
+  }
+  .ctx-menu button:hover { background: rgba(255, 255, 255, 0.09); }
+  .ctx-menu .ctx-danger { color: #ff9a9a; }
+  .ctx-menu .ctx-danger:hover { background: rgba(255, 80, 80, 0.16); }
+  .ctx-sep {
+    height: 1px;
+    background: rgba(255, 255, 255, 0.08);
+    margin: 4px 6px;
+  }
+
+  /* ===== Modals (editor + delete confirm) ===== */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 80;
+  }
+  .modal {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 90;
+    background: rgba(20, 20, 26, 0.98);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 14px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+    display: flex;
+    flex-direction: column;
+  }
+  .editor-modal { width: 440px; }
+  .confirm-modal { width: 320px; padding: 20px; gap: 16px; }
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 18px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .modal-header h2 {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0;
+    color: var(--fg);
+  }
+
+  .editor-body {
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .field-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--fg-dim);
+  }
+  .field-hint {
+    font-size: 11px;
+    color: var(--fg-dim);
+    opacity: 0.8;
+  }
+  .field input[type="text"] {
+    width: 100%;
+    box-sizing: border-box;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    color: var(--fg);
+    padding: 8px 10px;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 120ms, background 120ms;
+  }
+  .field input[type="text"]:focus {
+    border-color: var(--accent);
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .field-row {
+    display: flex;
+    gap: 8px;
+  }
+  .field-row input { flex: 1; }
+  .field-row .btn-secondary { white-space: nowrap; }
+
+  .icon-field {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .icon-preview {
+    width: 52px;
+    height: 52px;
+    flex-shrink: 0;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .icon-preview img {
+    width: 80%;
+    height: 80%;
+    object-fit: contain;
+  }
+  .icon-preview .icon-fallback {
+    width: 80%;
+    height: 80%;
+    font-size: 20px;
+  }
+  .icon-spinner {
+    width: 18px;
+    height: 18px;
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  .icon-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 18px 16px;
+  }
+  .confirm-modal .modal-actions { padding: 0; }
+  .confirm-text {
+    font-size: 13.5px;
+    color: var(--fg);
+    margin: 0;
+    line-height: 1.4;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    color: #10131c;
+    padding: 8px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 12.5px;
+    font-weight: 600;
+    transition: filter 120ms;
+  }
+  .btn-primary:hover { filter: brightness(1.1); }
+
+  .btn-danger {
+    background: rgba(255, 80, 80, 0.16);
+    border: 1px solid rgba(255, 80, 80, 0.4);
+    color: #ff9a9a;
+    padding: 8px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 12.5px;
+    font-weight: 600;
+    transition: background 120ms;
+  }
+  .btn-danger:hover { background: rgba(255, 80, 80, 0.26); }
 </style>

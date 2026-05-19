@@ -1,6 +1,6 @@
 {
   "name": "wisplet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Keyboard-first app launcher overlay for Windows 11",
   "homepage": "https://github.com/greyfox-be/wisplet",
   "repository": {
@@ -21,6 +21,7 @@
   "license": "MIT",
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-opener": "^2"
   },
   "devDependencies": {
