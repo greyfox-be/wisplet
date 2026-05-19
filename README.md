@@ -1,6 +1,13 @@
-# Wisplet
+<p align="center">
+  <img src="brand-kit/icon.svg" alt="Wisplet" width="120" />
+</p>
 
-> Keyboard-first app launcher overlay for Windows 11 — global hotkey toggle, grouped sections, Mica blur. Built with Tauri 2 + Svelte 5.
+<h1 align="center">Wisplet</h1>
+
+<p align="center">
+  Keyboard-first app launcher overlay for Windows 11 — global hotkey toggle,
+  grouped sections, Mica blur. Built with Tauri 2 + Svelte 5.
+</p>
 
 Wisplet is a Launchpad-inspired app launcher that overlays the desktop on a global hotkey. Search, browse grouped sections, launch — then it gets out of your way.
 
