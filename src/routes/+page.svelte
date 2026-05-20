@@ -30,6 +30,7 @@
     fullscreen: boolean;
     groupOrder: string[];
     hotkey: string;
+    accent: string;
   };
 
   const DEFAULT_SETTINGS: Settings = {
@@ -40,7 +41,22 @@
     fullscreen: false,
     groupOrder: [],
     hotkey: "Alt+Space",
+    accent: "#8ab4ff",
   };
+
+  // Parse #rrggbb → "r, g, b" for rgba(var(--accent-rgb), …) usage in CSS.
+  // Invalid input falls back to the default accent so a corrupted setting
+  // never produces an unrenderable var.
+  function hexToRgb(hex: string): string {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+    if (!m) return "138, 180, 255";
+    const n = parseInt(m[1], 16);
+    return `${(n >> 16) & 0xff}, ${(n >> 8) & 0xff}, ${n & 0xff}`;
+  }
+
+  function isValidHex(hex: string): boolean {
+    return /^#[0-9a-f]{6}$/i.test(hex.trim());
+  }
 
   function loadSettings(): Settings {
     try {
@@ -51,6 +67,7 @@
       if (parsed.bgMode !== "mica") parsed.bgMode = "mica";
       if (!Array.isArray(parsed.groupOrder)) parsed.groupOrder = [];
       if (typeof parsed.hotkey !== "string" || !parsed.hotkey.trim()) parsed.hotkey = DEFAULT_SETTINGS.hotkey;
+      if (typeof parsed.accent !== "string" || !isValidHex(parsed.accent)) parsed.accent = DEFAULT_SETTINGS.accent;
       return { ...DEFAULT_SETTINGS, ...parsed };
     } catch {
       return { ...DEFAULT_SETTINGS };
@@ -622,7 +639,7 @@
   <main
     class="root {settings.bgMode}"
     class:visible
-    style="--icon-size: {settings.iconSize}px; --label-size: {settings.labelSize}px; --tile-min: {settings.tileMin}px;"
+    style="--icon-size: {settings.iconSize}px; --label-size: {settings.labelSize}px; --tile-min: {settings.tileMin}px; --accent: {settings.accent}; --accent-rgb: {hexToRgb(settings.accent)};"
     ontransitionend={(e) => { if (e.target === e.currentTarget && (e as TransitionEvent).propertyName === 'opacity' && !visible) onAnimOutEnd(); }}
   >
     <div class="top-bar">
@@ -793,6 +810,25 @@
                 />
                 <span class="switch-track"></span>
                 <span class="switch-thumb"></span>
+              </span>
+            </label>
+
+            <label class="setting-row toggle-row">
+              <span class="setting-label">Couleur d'accent</span>
+              <span class="accent-picker">
+                <span class="accent-hex">{settings.accent.toUpperCase()}</span>
+                <input
+                  type="color"
+                  bind:value={settings.accent}
+                  aria-label="Couleur d'accent"
+                />
+                <button
+                  class="accent-reset"
+                  onclick={(e) => { e.preventDefault(); settings.accent = DEFAULT_SETTINGS.accent; }}
+                  disabled={settings.accent.toLowerCase() === DEFAULT_SETTINGS.accent.toLowerCase()}
+                  aria-label="Réinitialiser la couleur d'accent"
+                  title="Réinitialiser"
+                >↺</button>
               </span>
             </label>
           </section>
@@ -1027,6 +1063,7 @@
     --fg: #f0f0f2;
     --fg-dim: #a8a8b0;
     --accent: #8ab4ff;
+    --accent-rgb: 138, 180, 255;
     --card-bg: rgba(20, 20, 26, 0.55);
     --card-border: rgba(255, 255, 255, 0.06);
   }
@@ -1120,7 +1157,7 @@
   }
   .search-wrap input:focus {
     background: rgba(255, 255, 255, 0.09);
-    border-color: rgba(138, 180, 255, 0.4);
+    border-color: rgba(var(--accent-rgb), 0.4);
   }
   .search-wrap input::placeholder { color: var(--fg-dim); }
 
@@ -1162,8 +1199,8 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    background: rgba(138, 180, 255, 0.12);
-    border: 1px solid rgba(138, 180, 255, 0.3);
+    background: rgba(var(--accent-rgb), 0.12);
+    border: 1px solid rgba(var(--accent-rgb), 0.3);
     color: #e3ecff;
     padding: 8px 12px;
     border-radius: 10px;
@@ -1228,7 +1265,7 @@
     height: 3px;
     border-radius: 2px;
     background: var(--accent);
-    box-shadow: 0 0 8px rgba(138, 180, 255, 0.6);
+    box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.6);
     pointer-events: none;
   }
   .card.drop-before::before { top: -7px; }
@@ -1466,7 +1503,7 @@
   }
   .seg button:hover { color: var(--fg); }
   .seg button.active {
-    background: rgba(138, 180, 255, 0.18);
+    background: rgba(var(--accent-rgb), 0.18);
     color: var(--accent);
   }
 
@@ -1512,6 +1549,52 @@
   }
   .switch.on .switch-track { background: var(--accent); }
   .switch.on .switch-thumb { transform: translateX(16px); background: #fff; }
+
+  .accent-picker {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .accent-hex {
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 11px;
+    color: var(--fg-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .accent-picker input[type="color"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 28px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 6px;
+    background: transparent;
+    cursor: pointer;
+    overflow: hidden;
+  }
+  .accent-picker input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+  .accent-picker input[type="color"]::-webkit-color-swatch {
+    border: none;
+    border-radius: 4px;
+  }
+  .accent-reset {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: var(--fg-dim);
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 120ms, color 120ms;
+  }
+  .accent-reset:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); color: var(--fg); }
+  .accent-reset:disabled { opacity: 0.35; cursor: not-allowed; }
 
   .btn-secondary {
     background: rgba(255, 255, 255, 0.06);
@@ -1579,8 +1662,8 @@
     animation: pulse 1.2s ease-in-out infinite;
   }
   @keyframes pulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(138, 180, 255, 0.4); }
-    50% { box-shadow: 0 0 0 4px rgba(138, 180, 255, 0); }
+    0%, 100% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.4); }
+    50% { box-shadow: 0 0 0 4px rgba(var(--accent-rgb), 0); }
   }
 
   .capture-box {
@@ -1590,7 +1673,7 @@
     gap: 8px;
     padding: 12px;
     background: rgba(255, 255, 255, 0.04);
-    border: 1px dashed rgba(138, 180, 255, 0.35);
+    border: 1px dashed rgba(var(--accent-rgb), 0.35);
     border-radius: 8px;
   }
   .capture-hint {
