@@ -455,10 +455,17 @@ fn inspect_app(path: String) -> AppSuggestion {
 #[tauri::command]
 fn launch_app(path: String) -> Result<(), String> {
     use std::process::Command;
-    Command::new("cmd")
-        .args(["/c", "start", "", "/B", &path])
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/c", "start", "", "/B", &path]);
+    // Without this the child inherits Wisplet's own cwd, and anything that
+    // resolves sibling files relatively (mod loaders, portable tools) fails.
+    // .lnk files carry their own "Start in", so let the shell decide there.
+    if !path.to_lowercase().ends_with(".lnk") {
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            cmd.current_dir(dir);
+        }
+    }
+    cmd.spawn().map_err(|e| e.to_string())?;
     Ok(())
 }
 
