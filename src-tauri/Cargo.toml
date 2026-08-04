@@ -1,6 +1,6 @@
 [package]
 name = "wisplet"
-version = "0.2.0"
+version = "0.3.0"
 description = "Keyboard-first app launcher overlay for Windows 11"
 authors = ["Greyfox Consulting"]
 edition = "2021"
