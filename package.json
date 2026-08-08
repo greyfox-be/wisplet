@@ -1,6 +1,6 @@
 {
   "name": "wisplet",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Keyboard-first app launcher overlay for Windows 11",
   "homepage": "https://github.com/greyfox-be/wisplet",
   "repository": {
