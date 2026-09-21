@@ -535,6 +535,9 @@ fn monitor_for_cursor(app: &AppHandle) -> Option<Monitor> {
 }
 
 fn apply_window_geometry(app: &AppHandle, window: &WebviewWindow, fullsize: bool) {
+    // Shadow keeps invisible resize borders around the client → offsets it off the monitor.
+    let _ = window.set_shadow(!fullsize);
+    let _ = window.set_resizable(!fullsize);
     if fullsize {
         if let Some(monitor) = monitor_for_cursor(app) {
             let _ = window.set_size(*monitor.size());
