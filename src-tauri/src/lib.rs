@@ -461,7 +461,8 @@ fn launch_app(path: String) -> Result<(), String> {
     // resolves sibling files relatively (mod loaders, portable tools) fails.
     // .lnk files carry their own "Start in", so let the shell decide there.
     if !path.to_lowercase().ends_with(".lnk") {
-        if let Some(dir) = std::path::Path::new(&path).parent() {
+        // is_dir skips non-filesystem targets like shell:AppsFolder\<AUMID> (Store apps).
+        if let Some(dir) = std::path::Path::new(&path).parent().filter(|d| d.is_dir()) {
             cmd.current_dir(dir);
         }
     }
