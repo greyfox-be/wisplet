@@ -16,6 +16,7 @@
     icon: string | null;
     group: string | null;
     type: string | null;
+    extensions?: string[];
   };
 
   type Section = { name: string; apps: App[] };
@@ -110,6 +111,29 @@
   // pre-fill for "Ajouter une app" — the card's group, or null in empty space.
   let contextMenu = $state<{ x: number; y: number; app: App | null; group: string | null } | null>(null);
   let pendingDelete = $state<App | null>(null);
+  // Editor field for folder entries, "ahk, ps1" ↔ extensions[].
+  let extensionsInput = $state("");
+
+  // Files listed by "folder" entries, rebuilt by Rust on every show.
+  let folderTiles = $state<App[]>([]);
+  let tiles = $derived([...apps.filter((a) => a.type !== "folder"), ...folderTiles]);
+
+  async function refreshFolders() {
+    const folders = apps.filter((a) => a.type === "folder");
+    if (folders.length === 0) {
+      folderTiles = [];
+      return;
+    }
+    try {
+      folderTiles = await invoke<App[]>("expand_folders", { folders });
+    } catch (e) {
+      console.warn("expand_folders failed:", e);
+    }
+  }
+
+  $effect(() => {
+    if (mounted) refreshFolders();
+  });
 
   // Persist settings
   $effect(() => {
@@ -374,9 +398,10 @@
     }
   }
 
-  function openAddEditor(group: string | null = null) {
+  function openAddEditor(group: string | null = null, type: "app" | "folder" = "app") {
     editorMode = "add";
-    editorDraft = { id: Date.now(), title: "", path: "", icon: null, group, type: "app" };
+    editorDraft = { id: Date.now(), title: "", path: "", icon: null, group, type };
+    extensionsInput = "";
     editorError = null;
     contextMenu = null;
     editorOpen = true;
@@ -386,6 +411,7 @@
   function openEditEditor(app: App) {
     editorMode = "edit";
     editorDraft = { ...app };
+    extensionsInput = (app.extensions ?? []).join(", ");
     editorError = null;
     contextMenu = null;
     editorOpen = true;
@@ -419,6 +445,14 @@
 
   async function browsePath() {
     if (!editorDraft) return;
+    if (editorDraft.type === "folder") {
+      const dir = await open({ directory: true, multiple: false });
+      if (typeof dir === "string") {
+        editorDraft.path = dir;
+        if (!editorDraft.title.trim()) editorDraft.title = dir.split(/[\\/]/).filter(Boolean).pop() ?? "";
+      }
+      return;
+    }
     const selected = await open({
       multiple: false,
       filters: [{ name: "Applications", extensions: ["exe", "lnk"] }],
@@ -448,8 +482,18 @@
     const path = editorDraft.path.trim();
     if (!title) { editorError = "Le titre est requis."; return; }
     if (!path) { editorError = "Le chemin est requis."; return; }
-    const group = editorDraft.group?.trim() || null;
+    const isFolder = editorDraft.type === "folder";
+    // A folder's tiles are grouped under its title, so it has no group of its own.
+    const group = isFolder ? null : editorDraft.group?.trim() || null;
     const finalApp: App = { ...editorDraft, title, path, group };
+    if (isFolder) {
+      finalApp.extensions = extensionsInput
+        .split(/[\s,;]+/)
+        .map((e) => e.replace(/^\./, "").toLowerCase())
+        .filter(Boolean);
+    } else {
+      delete finalApp.extensions;
+    }
     apps = editorMode === "add"
       ? [...apps, finalApp]
       : apps.map((a) => (a.id === finalApp.id ? finalApp : a));
@@ -462,7 +506,9 @@
   function onAppContextMenu(e: MouseEvent, app: App) {
     e.preventDefault();
     e.stopPropagation();
-    contextMenu = { x: e.clientX, y: e.clientY, app, group: app.group ?? null };
+    // A folder file tile carries its source entry's id → edit/delete the folder itself.
+    const source = apps.find((a) => a.id === app.id) ?? app;
+    contextMenu = { x: e.clientX, y: e.clientY, app: source, group: app.group ?? null };
   }
 
   function onCardContextMenu(e: MouseEvent, group: string) {
@@ -493,8 +539,8 @@
   let filteredSections = $derived.by(() => {
     const q = query.trim().toLowerCase();
     const filtered = q
-      ? apps.filter((a) => a.title.toLowerCase().includes(q))
-      : apps;
+      ? tiles.filter((a) => a.title.toLowerCase().includes(q))
+      : tiles;
     return groupApps(filtered);
   });
 
@@ -594,6 +640,7 @@
     // Tauri anim events fired by Rust on toggle / focus loss
     const unlistenIn = await win.listen<unknown>("anim-in", () => {
       query = "";
+      refreshFolders();
       visible = true;
       requestAnimationFrame(() => searchInput?.focus());
     });
@@ -720,7 +767,7 @@
                 <span class="count">{section.apps.length}</span>
               </h3>
               <div class="grid">
-                {#each section.apps as app (app.id)}
+                {#each section.apps as app (`${app.id}|${app.path}`)}
                   <button
                     class="app"
                     onclick={() => launch(app)}
@@ -838,9 +885,14 @@
             <p class="setting-hint">
               {apps.length} apps. Clic droit sur une tuile pour modifier ou supprimer.
             </p>
-            <button class="btn-secondary" onclick={() => openAddEditor()}>
-              Ajouter une app
-            </button>
+            <div class="field-row">
+              <button class="btn-secondary" onclick={() => openAddEditor()}>
+                Ajouter une app
+              </button>
+              <button class="btn-secondary" onclick={() => openAddEditor(null, "folder")}>
+                Ajouter un dossier
+              </button>
+            </div>
           </section>
 
           <section class="setting-group">
@@ -938,11 +990,14 @@
       ></div>
       <div class="ctx-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
         {#if contextMenu.app}
-          <button onclick={() => openEditEditor(contextMenu!.app!)}>Modifier</button>
+          <button onclick={() => openEditEditor(contextMenu!.app!)}>
+            {contextMenu.app.type === "folder" ? "Modifier le dossier" : "Modifier"}
+          </button>
           <button class="ctx-danger" onclick={() => requestDelete(contextMenu!.app!)}>Supprimer</button>
           <div class="ctx-sep"></div>
         {/if}
         <button onclick={() => openAddEditor(contextMenu!.group)}>Ajouter une app</button>
+        <button onclick={() => openAddEditor(null, "folder")}>Ajouter un dossier</button>
       </div>
     {/if}
 
@@ -961,7 +1016,10 @@
       <div class="modal-backdrop" transition:fade={{ duration: 120 }} role="presentation"></div>
       <div class="modal editor-modal" transition:scale={{ duration: 140, start: 0.96, easing: quintOut }}>
         <div class="modal-header">
-          <h2>{editorMode === "add" ? "Ajouter une app" : "Modifier l'app"}</h2>
+          <h2>
+            {editorMode === "add" ? "Ajouter" : "Modifier"}
+            {editorDraft.type === "folder" ? "un dossier" : editorMode === "add" ? "une app" : "l'app"}
+          </h2>
           <button class="drawer-close" onclick={closeEditor} aria-label="Close">✕</button>
         </div>
 
@@ -972,15 +1030,33 @@
               <input
                 type="text"
                 bind:value={editorDraft.path}
-                placeholder="C:\…\app.exe"
+                placeholder={editorDraft.type === "folder" ? "C:\\…\\Dossier" : "C:\\…\\app.exe"}
                 spellcheck="false"
                 autocomplete="off"
                 onkeydown={(e) => e.stopPropagation()}
               />
               <button class="btn-secondary" onclick={browsePath}>Parcourir…</button>
             </div>
-            <span class="field-hint">Sélectionner un .exe / .lnk pré-remplit l'icône et le titre.</span>
+            <span class="field-hint">
+              {editorDraft.type === "folder"
+                ? "Chaque fichier du dossier devient une tuile, relu à chaque ouverture."
+                : "Sélectionner un .exe / .lnk pré-remplit l'icône et le titre."}
+            </span>
           </label>
+
+          {#if editorDraft.type === "folder"}
+            <label class="field">
+              <span class="field-label">Extensions</span>
+              <input
+                type="text"
+                bind:value={extensionsInput}
+                placeholder="ahk, ps1 (vide = tous les fichiers)"
+                spellcheck="false"
+                autocomplete="off"
+                onkeydown={(e) => e.stopPropagation()}
+              />
+            </label>
+          {/if}
 
           <div class="field">
             <span class="field-label">Icône</span>
@@ -1008,17 +1084,18 @@
           </div>
 
           <label class="field">
-            <span class="field-label">Titre</span>
+            <span class="field-label">{editorDraft.type === "folder" ? "Titre de la section" : "Titre"}</span>
             <input
               type="text"
               bind:value={editorDraft.title}
-              placeholder="Nom de l'app"
+              placeholder={editorDraft.type === "folder" ? "AutoHotKey" : "Nom de l'app"}
               spellcheck="false"
               autocomplete="off"
               onkeydown={(e) => e.stopPropagation()}
             />
           </label>
 
+          {#if editorDraft.type !== "folder"}
           <label class="field">
             <span class="field-label">Groupe</span>
             <input
@@ -1036,6 +1113,7 @@
               {/each}
             </datalist>
           </label>
+          {/if}
 
           {#if editorError}
             <p class="setting-error">{editorError}</p>

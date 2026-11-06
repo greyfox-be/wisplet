@@ -113,6 +113,9 @@ pub struct App {
     pub app_type: Option<String>,
     #[serde(default)]
     pub group: Option<String>,
+    // type "folder" only: file extensions to list (empty = all files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<Vec<String>>,
 }
 
 #[derive(Default)]
@@ -325,20 +328,84 @@ fn save_extracted_icon(path: &str) -> Result<String, String> {
     let png = extract_icon_png(path)?;
     let dir = wisplet_icons_dir().ok_or_else(|| "Cannot resolve home directory".to_string())?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let stem = std::path::Path::new(path)
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let out = dir.join(format!("{}_{ts}.png", icon_slug(path)));
+    fs::write(&out, png).map_err(|e| e.to_string())?;
+    Ok(out.to_string_lossy().into_owned())
+}
+
+// Folder tiles are rebuilt on every show → icon cached per file path, extracted once.
+#[cfg(target_os = "windows")]
+fn cached_file_icon(path: &str) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.to_lowercase().hash(&mut h);
+    let dir = wisplet_icons_dir()?.join("folders");
+    let out = dir.join(format!("{}_{:016x}.png", icon_slug(path), h.finish()));
+    if !out.exists() {
+        let png = extract_icon_png(path).ok()?;
+        fs::create_dir_all(&dir).ok()?;
+        fs::write(&out, png).ok()?;
+    }
+    Some(out.to_string_lossy().into_owned())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cached_file_icon(_path: &str) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn icon_slug(path: &str) -> String {
+    std::path::Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("app")
         .chars()
         .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
-        .collect::<String>();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let out = dir.join(format!("{stem}_{ts}.png"));
-    fs::write(&out, png).map_err(|e| e.to_string())?;
-    Ok(out.to_string_lossy().into_owned())
+        .collect()
+}
+
+// List a "folder" entry's matching files as launchable tiles grouped under its title.
+fn folder_tiles(folder: &App) -> Vec<App> {
+    let exts: Vec<String> = folder
+        .extensions
+        .iter()
+        .flatten()
+        .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect();
+    let Ok(entries) = fs::read_dir(&folder.path) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+            exts.is_empty() || exts.contains(&ext)
+        })
+        .map(|p| {
+            let path = p.to_string_lossy().into_owned();
+            App {
+                id: folder.id,
+                title: file_stem(&path),
+                icon: folder.icon.clone().or_else(|| cached_file_icon(&path)),
+                path,
+                app_type: Some("folder-item".to_string()),
+                group: Some(folder.title.clone()),
+                extensions: None,
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn expand_folders(folders: Vec<App>) -> Vec<App> {
+    folders.iter().flat_map(folder_tiles).collect()
 }
 
 fn file_stem(path: &str) -> String {
@@ -712,6 +779,7 @@ pub fn run() {
             load_apps,
             save_apps,
             inspect_app,
+            expand_folders,
             launch_app,
             hide_window,
             set_fullsize_pref,
