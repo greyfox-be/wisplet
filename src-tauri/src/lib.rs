@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -129,6 +129,8 @@ struct AppState {
     // window focus; without this flag the Focused(false) handler would emit
     // anim-out and hide the launcher mid-edit.
     hide_suppressed: AtomicBool,
+    // Bumped on every show — lets a pending fallback hide detect it is stale.
+    show_gen: AtomicU64,
     current_shortcut: Mutex<Option<Shortcut>>,
     current_combo: Mutex<Option<String>>,
 }
@@ -617,6 +619,22 @@ fn apply_window_geometry(app: &AppHandle, window: &WebviewWindow, fullsize: bool
     let _ = window.center();
 }
 
+// Svelte hides on transitionend, which never fires when opacity is already 0 → hide anyway.
+fn request_hide(app: &AppHandle) {
+    let _ = app.emit("anim-out", ());
+    let gen = app.state::<AppState>().show_gen.load(Ordering::Relaxed);
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if handle.state::<AppState>().show_gen.load(Ordering::Relaxed) != gen {
+            return;
+        }
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = window.hide();
+        }
+    });
+}
+
 // Toggle flow:
 //   - Hidden → set geometry (windowed or monitor-cover), show invisible (alpha 0),
 //     wait for first paint, emit "anim-in" so Svelte starts its fade, then 60ms
@@ -626,8 +644,9 @@ fn show_or_hide(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         let visible = window.is_visible().map_err(|e| e.to_string())?;
         if visible {
-            let _ = app.emit("anim-out", ());
+            request_hide(app);
         } else {
+            app.state::<AppState>().show_gen.fetch_add(1, Ordering::Relaxed);
             set_window_alpha(&window, 0);
             let fullsize = app.state::<AppState>().fullsize.load(Ordering::Relaxed);
             apply_window_geometry(app, &window, fullsize);
@@ -737,7 +756,7 @@ pub fn run() {
                             .hide_suppressed
                             .load(Ordering::Relaxed);
                         if !suppressed {
-                            let _ = handle.emit("anim-out", ());
+                            request_hide(&handle);
                         }
                     }
                 });
